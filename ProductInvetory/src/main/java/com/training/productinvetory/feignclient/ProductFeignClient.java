@@ -12,3 +12,5 @@ public interface ProductFeignClient {
     @GetMapping("/products")
     List<Product> getAllProducts();
 }
+
+
