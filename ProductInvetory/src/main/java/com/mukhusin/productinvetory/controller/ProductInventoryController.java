@@ -2,19 +2,17 @@ package com.mukhusin.productinvetory.controller;
 
 import com.mukhusin.productinvetory.dto.InventoryDetails;
 import com.mukhusin.productinvetory.dto.InventoryRequest;
-import com.mukhusin.productinvetory.dto.Product;
 import com.mukhusin.productinvetory.entity.Action;
 import com.mukhusin.productinvetory.entity.ProductInventory;
+import com.mukhusin.productinvetory.feignclient.ProductFeignClient;
 import com.mukhusin.productinvetory.repository.ProductInventoryRepository;
+import feign.FeignException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDate;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,12 +21,11 @@ import java.util.Map;
 @RequestMapping("/inventory")
 public class ProductInventoryController {
 
-    private static final String PRODUCT_URL = "http://localhost:8087/products";
-
     @Autowired
     private ProductInventoryRepository productInventoryRepository;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    @Autowired
+    private ProductFeignClient productFeignClient;
 
     @GetMapping
     public List<InventoryDetails> getInventory() {
@@ -77,9 +74,8 @@ public class ProductInventoryController {
     private Map<Long, String> getProductNames() {
         Map<Long, String> productNames = new HashMap<>();
         try {
-            ResponseEntity<Product[]> response = restTemplate.getForEntity(PRODUCT_URL, Product[].class);
-            Arrays.stream(response.getBody()).forEach(p -> productNames.put(p.getId(), p.getName()));
-        } catch (RestClientException e) {
+            productFeignClient.getAllProducts().forEach(p -> productNames.put(p.getId(), p.getName()));
+        } catch (FeignException e) {
             return productNames;
         }
         return productNames;

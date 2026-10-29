@@ -6,17 +6,17 @@ import com.mukhusin.orderservice.dto.OrderRequest;
 import com.mukhusin.orderservice.dto.Product;
 import com.mukhusin.orderservice.entity.Order;
 import com.mukhusin.orderservice.entity.OrderItem;
+import com.mukhusin.orderservice.feignclient.InventoryFeignClient;
+import com.mukhusin.orderservice.feignclient.ProductFeignClient;
 import com.mukhusin.orderservice.repository.OrderItemRepository;
 import com.mukhusin.orderservice.repository.OrderRepository;
+import feign.FeignException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,32 +25,33 @@ import java.util.Map;
 @RequestMapping("/orders")
 public class OrderController {
 
-    private static final String PRODUCT_URL = "http://localhost:8087/products/";
-    private static final String INVENTORY_URL = "http://localhost:8089/inventory/";
-
     @Autowired
     private OrderRepository orderRepository;
 
     @Autowired
     private OrderItemRepository orderItemRepository;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    @Autowired
+    private ProductFeignClient productFeignClient;
+
+    @Autowired
+    private InventoryFeignClient inventoryFeignClient;
 
     @PostMapping
     public ResponseEntity<?> placeOrder(@RequestBody OrderRequest request) {
         Product product;
         try {
-            product = restTemplate.getForObject(PRODUCT_URL + request.getProductId(), Product.class);
-        } catch (RestClientException e) {
+            product = productFeignClient.getProductById(request.getProductId());
+        } catch (FeignException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found");
         }
 
-        Integer available = restTemplate.getForObject(INVENTORY_URL + "available/" + request.getProductId(), Integer.class);
+        Integer available = inventoryFeignClient.getAvailableQuantity(request.getProductId());
         if (available == null || available < request.getQuantity()) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Insufficient quantity, available: " + available);
         }
 
-        restTemplate.postForObject(INVENTORY_URL + "deduct", request, Object.class);
+        inventoryFeignClient.deductQuantity(request);
 
         double totalPrice = product.getPrice() * request.getQuantity();
 
@@ -83,7 +84,7 @@ public class OrderController {
         }
 
         for (OrderItem item : orderItemRepository.findByOrderId(id)) {
-            restTemplate.postForObject(INVENTORY_URL + "add", new OrderRequest(item.getProductId(), item.getQuantity()), Object.class);
+            inventoryFeignClient.addQuantity(new OrderRequest(item.getProductId(), item.getQuantity()));
         }
 
         order.setStatus("CANCELLED");
@@ -120,9 +121,8 @@ public class OrderController {
     private Map<Long, String> getProductNames() {
         Map<Long, String> productNames = new HashMap<>();
         try {
-            ResponseEntity<Product[]> response = restTemplate.getForEntity("http://localhost:8087/products", Product[].class);
-            Arrays.stream(response.getBody()).forEach(p -> productNames.put(p.getId(), p.getName()));
-        } catch (RestClientException e) {
+            productFeignClient.getAllProducts().forEach(p -> productNames.put(p.getId(), p.getName()));
+        } catch (FeignException e) {
             return productNames;
         }
         return productNames;
