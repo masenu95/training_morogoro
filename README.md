@@ -1,6 +1,6 @@
 # training_morogoro
 
-Four Spring Boot services for managing products, inventory and orders. Each service uses Spring Data JPA with MySQL and exposes a REST API that other services and Postman can call. Services call each other with `RestTemplate`.
+Four Spring Boot services for managing products, inventory and orders. Each service uses Spring Data JPA with MySQL and exposes a REST API that other services and Postman can call. Services call each other with OpenFeign clients (`@FeignClient`).
 
 ## Services
 
