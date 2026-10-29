@@ -2,6 +2,7 @@ package com.training.productinvetory.controller;
 
 import com.training.productinvetory.dto.InventoryDetails;
 import com.training.productinvetory.dto.InventoryRequest;
+import com.training.productinvetory.dto.ProductStock;
 import com.training.productinvetory.entity.Action;
 import com.training.productinvetory.entity.ProductInventory;
 import com.training.productinvetory.feignclient.ProductFeignClient;
@@ -40,6 +41,16 @@ public class ProductInventoryController {
                         inventory.getClosingQuantity(),
                         inventory.getAction(),
                         inventory.getActionDate()))
+                .toList();
+    }
+
+    @GetMapping("/products")
+    public List<ProductStock> getProductStock() {
+        return productFeignClient.getAllProducts().stream()
+                .map(product -> new ProductStock(
+                        product.getId(),
+                        product.getName(),
+                        getAvailable(product.getId())))
                 .toList();
     }
 
