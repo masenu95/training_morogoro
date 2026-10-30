@@ -11,6 +11,11 @@ import com.training.orderservice.feignclient.ProductFeignClient;
 import com.training.orderservice.repository.OrderItemRepository;
 import com.training.orderservice.repository.OrderRepository;
 import feign.FeignException;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.github.resilience4j.retry.annotation.Retry;
+import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -38,6 +43,9 @@ public class OrderController {
     private InventoryFeignClient inventoryFeignClient;
 
     @PostMapping
+    @RateLimiter(name = "orderRateLimiter", fallbackMethod = "placeOrderFallback")
+    @Bulkhead(name = "orderBulkhead", fallbackMethod = "placeOrderFallback", type = Bulkhead.Type.SEMAPHORE)
+    @CircuitBreaker(name = "orderService", fallbackMethod = "placeOrderFallback")
     public ResponseEntity<?> placeOrder(@RequestBody OrderRequest request) {
         Product product;
         try {
@@ -73,7 +81,15 @@ public class OrderController {
         return new ResponseEntity<>(order, HttpStatus.CREATED);
     }
 
+    // FIXED: Added Throwable parameter and removed @RequestBody
+    public ResponseEntity<?> placeOrderFallback(OrderRequest request, Throwable t) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body("Product or Inventory service unavailable. Reason: " + t.getMessage());
+    }
+
     @PutMapping("/{id}/cancel")
+    @CircuitBreaker(name = "orderService", fallbackMethod = "cancelOrderFallback")
+    @Retry(name = "orderRetry", fallbackMethod = "cancelOrderFallback")
     public ResponseEntity<?> cancelOrder(@PathVariable Long id) {
         Order order = orderRepository.findById(id).orElse(null);
         if (order == null) {
@@ -91,7 +107,14 @@ public class OrderController {
         return ResponseEntity.ok(orderRepository.save(order));
     }
 
+    // FIXED: Added Throwable parameter, changed parameter to match 'Long id', and removed @PathVariable
+    public ResponseEntity<?> cancelOrderFallback(Long id, Throwable t) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body("Unable to cancel order right now. Service unavailable.");
+    }
+
     @GetMapping
+//    @CircuitBreaker(name = "")
     public List<OrderDetails> getOrders() {
         Map<Long, String> productNames = getProductNames();
         return orderRepository.findAll().stream()
