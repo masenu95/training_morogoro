@@ -325,14 +325,14 @@ Response `200 OK`:
 ]
 ```
 
-#### Get items of one order
+#### Get items of one order with product name
 
 `GET /orders/{id}/items`, for example `GET /orders/1/items`
 
 Response `200 OK`:
 ```json
 [
-  {"id": 1, "orderId": 1, "productId": 1, "quantity": 2, "price": 1500000.0, "totalAmount": 3000000.0}
+  {"id": 1, "productId": 1, "productName": "Laptop", "quantity": 2, "price": 1500000.0, "totalAmount": 3000000.0}
 ]
 ```
 

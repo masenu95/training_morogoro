@@ -137,8 +137,18 @@ public class OrderController {
     }
 
     @GetMapping("/{id}/items")
-    public List<OrderItem> getOrderItems(@PathVariable Long id) {
-        return orderItemRepository.findByOrderId(id);
+    public List<OrderItemDetails> getOrderItems(@PathVariable Long id) {
+        Map<Long, String> productNames = getProductNames();
+
+        return orderItemRepository.findByOrderId(id).stream()
+                .map(item -> new OrderItemDetails(
+                        item.getId(),
+                        item.getProductId(),
+                        productNames.get(item.getProductId()),
+                        item.getQuantity(),
+                        item.getPrice(),
+                        item.getTotalAmount()))
+                .toList();
     }
 
     private Map<Long, String> getProductNames() {
