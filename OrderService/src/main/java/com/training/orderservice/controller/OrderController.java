@@ -16,6 +16,7 @@ import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import io.github.resilience4j.retry.annotation.Retry;
 import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
+import io.micrometer.observation.annotation.Observed;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -48,11 +49,7 @@ public class OrderController {
     @CircuitBreaker(name = "orderService", fallbackMethod = "placeOrderFallback")
     public ResponseEntity<?> placeOrder(@RequestBody OrderRequest request) {
         Product product;
-        try {
-            product = productFeignClient.getProductById(request.getProductId());
-        } catch (FeignException e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found");
-        }
+        product = productFeignClient.getProductById(request.getProductId());
 
         Integer available = inventoryFeignClient.getAvailableQuantity(request.getProductId());
         if (available == null || available < request.getQuantity()) {
@@ -82,6 +79,7 @@ public class OrderController {
     }
 
     // FIXED: Added Throwable parameter and removed @RequestBody
+    @Observed(name = "place.order-fallback.execution")
     public ResponseEntity<?> placeOrderFallback(OrderRequest request, Throwable t) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body("Product or Inventory service unavailable. Reason: " + t.getMessage());
@@ -108,6 +106,7 @@ public class OrderController {
     }
 
     // FIXED: Added Throwable parameter, changed parameter to match 'Long id', and removed @PathVariable
+    @Observed(name = "place.order-fallback.execution")
     public ResponseEntity<?> cancelOrderFallback(Long id, Throwable t) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body("Unable to cancel order right now. Service unavailable.");
