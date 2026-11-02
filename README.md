@@ -9,8 +9,8 @@ Four Spring Boot services for managing products, inventory and orders, plus a Eu
 | Eureka-Server | netflix-eureka-server | 8761 | - | Service registry |
 | api-gateway | api-gateway | 8080 | - | Single entry point, routes requests through Eureka and logs them |
 | AddUpdateProduct | add-update-product | 7002 | training_products | Add and update products, and seed 12 sample products on startup |
-| FetchAllProduct | fetch-product-service | 7009 | training_products | Fetch all products, a product by id, or products by name |
-| OrderService | order-service | 7003 | order_db | Place, cancel and list orders and order items |
+| FetchAllProduct | fetch-product-service | 7009, 7010 | training_products | Fetch all products, a product by id, or products by name |
+| OrderService | order-service | 8089, 8090 | order_db | Place, cancel and list orders and order items |
 | ProductInvetory | inventory-service | 7004 | inventory_db | Record stock ADD/DEDUCT actions with opening and closing quantities |
 
 AddUpdateProduct and FetchAllProduct share the `products` table in `training_products`. A product added through AddUpdateProduct can be read through FetchAllProduct.
@@ -35,6 +35,42 @@ Incoming: POST /order-service/orders
 Outgoing: /order-service/orders status=201 CREATED time=184 ms
 ```
 
+The logs are shown in the console and also saved to `api-gateway/logs/api-gateway.log`. A new file starts every 10 MB, and files older than 7 days are deleted:
+
+```
+logging.file.name=logs/api-gateway.log
+logging.logback.rollingpolicy.max-file-size=10MB
+logging.logback.rollingpolicy.max-history=7
+```
+
+The `logs/` folder is not tracked by git.
+
+## Multiple instances
+
+FetchAllProduct and OrderService get the most traffic, so each runs two instances on different ports.
+
+| Service | Instance 1 | Instance 2 |
+|---|---|---|
+| fetch-product-service | 7009 | 7010 |
+| order-service | 8089 | 8090 |
+
+Each instance registers in Eureka with its own id, set in `application.properties`:
+
+```
+eureka.instance.instance-id=${spring.application.name}:${server.port}
+```
+
+Start the second instance on another port:
+
+```
+sh mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=7010
+sh mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8090
+```
+
+The gateway (`lb()`) and the Feign clients get the list of instances from Eureka and share requests between them. If one instance stops, requests go to the other one. Both instances use the same database, so the data is the same.
+
+The rate limiter and bulkhead count per instance, so with two OrderService instances the system accepts up to 10 orders per second.
+
 ## Resilience in OrderService
 
 OrderService uses Resilience4j annotations on its endpoints. When a protection is triggered, the endpoint returns `503 Service Unavailable` from its fallback method instead of an error.
@@ -54,7 +90,7 @@ Fallback responses:
 | `POST /orders` | 503 | `Product or Inventory service unavailable. Reason: ...` |
 | `PUT /orders/{id}/cancel` | 503 | `Unable to cancel order right now. Service unavailable.` |
 
-Actuator endpoints are exposed under `/just-me` on OrderService, for example `localhost:7003/just-me/health` and `localhost:7003/just-me/circuitbreakers`.
+Actuator endpoints are exposed under `/just-me` on OrderService, for example `localhost:8089/just-me/health` and `localhost:8089/just-me/circuitbreakers`.
 
 ## Communication
 
@@ -69,7 +105,7 @@ AddUpdateProduct :7002 ──writes──▶ [training_products] ◀──reads�
                                                        GET /products│          │GET /products
                                                   GET /products/{id}│          │
                                                                     │          │
-                               OrderService :7003 ──────────────────┘          │
+                               OrderService :8089 ──────────────────┘          │
                                       │                                        │
                                       │ GET  /inventory/available/{productId}  │
                                       │ POST /inventory/deduct                 │
@@ -106,6 +142,33 @@ If FetchAllProduct is down, `GET /orders` and `GET /inventory` still return, but
 2. For each order item, OrderService asks ProductInvetory to add the quantity back. ProductInvetory saves an ADD record.
 3. OrderService sets the order status to `CANCELLED`.
 4. If the inventory call fails, it is retried up to 3 times before the fallback returns `503`.
+
+## Patterns used
+
+| Group | Pattern | Where |
+|---|---|---|
+| Design | Decompose by business capability | Products, inventory and orders are separate services |
+| Design | Database per service | order_db, inventory_db, training_products |
+| Design | Command/query split | AddUpdateProduct writes, FetchAllProduct reads |
+| Communication | API Gateway | Single entry point on 8080 with routing and logging |
+| Communication | Service registry and discovery | Eureka, services call each other by name |
+| Communication | Synchronous REST with a declarative client | OpenFeign |
+| Communication | Client-side load balancing | Gateway `lb()` and Feign through Eureka |
+| Communication | Multiple instances per service | FetchAllProduct and OrderService |
+| Reliability | Circuit breaker with fallback | OrderService and inventory-service |
+| Reliability | Retry | Cancel order |
+| Reliability | Rate limiter | Place order and FetchAllProduct |
+| Reliability | Bulkhead | Place order |
+| Reliability | Time limiter | Configured in OrderService, not yet applied to an endpoint |
+| Observability | Distributed tracing | Zipkin |
+| Observability | Centralized request logging | Gateway, saved to `logs/api-gateway.log` |
+| Observability | Health check and metrics | Spring Boot Actuator |
+
+Not yet in place:
+
+- AddUpdateProduct and FetchAllProduct share the `training_products` database.
+- Placing an order deducts stock and then saves the order. There is no Saga, so if saving fails the stock is not returned automatically.
+- There is no config server. Each service has its own local `application.properties`.
 
 ## API reference
 
@@ -268,7 +331,7 @@ Response `200 OK`:
 
 The response has the same shape as the history endpoint, limited to records with today's `actionDate`.
 
-### OrderService (gateway `localhost:8080/order-service`, direct `localhost:7003`)
+### OrderService (gateway `localhost:8080/order-service`, direct `localhost:8089`)
 
 #### Place order
 
@@ -341,8 +404,9 @@ Response `200 OK`:
 1. Make sure MySQL is running. The databases are created automatically on first start.
 2. `application.properties` is not tracked by git. Create it in each service's `src/main/resources` with the name and port from the table above.
 3. Start Eureka-Server first, then api-gateway, AddUpdateProduct, FetchAllProduct, ProductInvetory and OrderService. Run each one with `./mvnw spring-boot:run` from its folder.
-4. Check `localhost:8761` to see that all services are registered.
-5. Add stock with `POST localhost:8080/inventory-service/inventory/add`, then place an order with `POST localhost:8080/order-service/orders`.
+4. Start the second FetchAllProduct and OrderService instances on ports 7010 and 8090, as shown in Multiple instances.
+5. Check `localhost:8761` to see that all services are registered, with two instances for fetch-product-service and order-service.
+6. Add stock with `POST localhost:8080/inventory-service/inventory/add`, then place an order with `POST localhost:8080/order-service/orders`.
 
 ## Project Progress
 

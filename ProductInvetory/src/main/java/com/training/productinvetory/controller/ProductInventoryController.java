@@ -8,6 +8,9 @@ import com.training.productinvetory.entity.ProductInventory;
 import com.training.productinvetory.feignclient.ProductFeignClient;
 import com.training.productinvetory.repository.ProductInventoryRepository;
 import feign.FeignException;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.micrometer.observation.annotation.Observed;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -45,13 +48,19 @@ public class ProductInventoryController {
     }
 
     @GetMapping("/products")
-    public List<ProductStock> getProductStock() {
-        return productFeignClient.getAllProducts().stream()
+    @CircuitBreaker(name = "inventoryService", fallbackMethod = "productStockFallback")
+    public ResponseEntity<?> getProductStock() {
+        return ResponseEntity.ok(productFeignClient.getAllProducts().stream()
                 .map(product -> new ProductStock(
                         product.getId(),
                         product.getName(),
                         getAvailable(product.getId())))
-                .toList();
+                .toList());
+    }
+
+    @Observed(name = "product-fallback-execution")
+    public ResponseEntity<?> productStockFallback(Throwable t) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Product service may not be available");
     }
 
     @PostMapping("/add")
@@ -68,8 +77,14 @@ public class ProductInventoryController {
     }
 
     @GetMapping("/available/{productId}")
-    public Integer availableQuantity(@PathVariable Long productId) {
-        return getAvailable(productId);
+    @CircuitBreaker(name = "inventoryService", fallbackMethod = "availableFallback")
+    public ResponseEntity<?> availableQuantity(@PathVariable Long productId) {
+        return ResponseEntity.ok(getAvailable(productId));
+    }
+
+    @Observed(name = "available-inventory-fallback-execution")
+    public ResponseEntity<?> availableFallback(Long productId, Throwable t) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Product service may not be available");
     }
 
     @GetMapping("/{productId}")

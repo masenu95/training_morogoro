@@ -2,6 +2,7 @@ package com.training.orderservice.controller;
 
 import com.training.orderservice.dto.OrderDetails;
 import com.training.orderservice.dto.OrderItemDetails;
+import com.training.orderservice.dto.OrderMessage;
 import com.training.orderservice.dto.OrderRequest;
 import com.training.orderservice.dto.Product;
 import com.training.orderservice.entity.Order;
@@ -10,6 +11,7 @@ import com.training.orderservice.feignclient.InventoryFeignClient;
 import com.training.orderservice.feignclient.ProductFeignClient;
 import com.training.orderservice.repository.OrderItemRepository;
 import com.training.orderservice.repository.OrderRepository;
+import com.training.orderservice.services.OrderProcessService;
 import feign.FeignException;
 import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
@@ -22,7 +24,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +44,9 @@ public class OrderController {
     @Autowired
     private InventoryFeignClient inventoryFeignClient;
 
+    @Autowired
+    private OrderProcessService orderProcessService;
+
     @PostMapping
     @RateLimiter(name = "orderRateLimiter", fallbackMethod = "placeOrderFallback")
     @Bulkhead(name = "orderBulkhead", fallbackMethod = "placeOrderFallback", type = Bulkhead.Type.SEMAPHORE)
@@ -58,24 +62,12 @@ public class OrderController {
 
         inventoryFeignClient.deductQuantity(request);
 
-        double totalPrice = product.getPrice() * request.getQuantity();
+        if (!orderProcessService.sendOrder(new OrderMessage(request.getProductId(), request.getQuantity(), product.getPrice()))) {
+            inventoryFeignClient.addQuantity(request);
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Order not received, please try again");
+        }
 
-        Order order = new Order();
-        order.setQuantity(request.getQuantity());
-        order.setTotalPrice(totalPrice);
-        order.setStatus("PLACED");
-        order.setOrderDate(LocalDateTime.now());
-        order = orderRepository.save(order);
-
-        OrderItem item = new OrderItem();
-        item.setOrderId(order.getId());
-        item.setProductId(request.getProductId());
-        item.setQuantity(request.getQuantity());
-        item.setPrice(product.getPrice());
-        item.setTotalAmount(totalPrice);
-        orderItemRepository.save(item);
-
-        return new ResponseEntity<>(order, HttpStatus.CREATED);
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body("Order received and will be saved shortly");
     }
 
     // FIXED: Added Throwable parameter and removed @RequestBody
