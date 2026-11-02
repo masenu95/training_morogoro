@@ -1,8 +1,10 @@
 package com.training.orderservice.services;
 
+import com.training.orderservice.dto.OrderEvent;
 import com.training.orderservice.dto.OrderMessage;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
+import com.training.orderservice.events.EventPublisher;
 import com.training.orderservice.repository.OrderItemRepository;
 import com.training.orderservice.repository.OrderRepository;
 import org.slf4j.Logger;
@@ -27,6 +29,9 @@ public class OrderProcessService {
 
     @Autowired
     private OrderItemRepository orderItemRepository;
+
+    @Autowired
+    private EventPublisher eventPublisher;
 
     public boolean sendOrder(OrderMessage message) {
         try {
@@ -59,6 +64,7 @@ public class OrderProcessService {
         orderItemRepository.save(item);
 
         log.info("Order saved id={} {}", order.getId(), message);
+        eventPublisher.publish("orderEvents-out-0", new OrderEvent(order.getId(), message.productId(), message.quantity(), totalPrice, order.getStatus()));
         return order;
     }
 }

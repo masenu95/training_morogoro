@@ -1,6 +1,6 @@
 # training_morogoro
 
-Four Spring Boot services for managing products, inventory and orders, plus a Eureka server and an API gateway. Each service uses Spring Data JPA with MySQL and exposes a REST API. Services register with Eureka and call each other by service name with OpenFeign clients (`@FeignClient`). Clients such as Postman go through the gateway, which logs every request. OrderService is protected with Resilience4j: circuit breaker, retry, rate limiter, bulkhead and time limiter.
+Four Spring Boot services for managing products, inventory and orders, plus a Eureka server and an API gateway. Each service uses Spring Data JPA with MySQL and exposes a REST API. Services share data through events on RabbitMQ and keep local copies of the data they need. They register with Eureka, and OrderService uses OpenFeign clients (`@FeignClient`) as a fallback when its local copy is not enough. Clients such as Postman go through the gateway, which logs every request. OrderService is protected with Resilience4j: circuit breaker, retry, rate limiter, bulkhead and time limiter.
 
 ## Services
 
@@ -35,10 +35,10 @@ Incoming: POST /order-service/orders
 Outgoing: /order-service/orders status=201 CREATED time=184 ms
 ```
 
-The logs are shown in the console and also saved to `api-gateway/logs/api-gateway.log`. A new file starts every 10 MB, and files older than 7 days are deleted:
+The logs are shown in the console and also saved to `api-gateway/logs/api-gateway.log`. The path is absolute, so the file goes there no matter which folder the gateway is started from. A new file starts every 10 MB, and files older than 7 days are deleted:
 
 ```
-logging.file.name=logs/api-gateway.log
+logging.file.name=/home/mukhusin-siraji/Dev/training/training_morogoro/api-gateway/logs/api-gateway.log
 logging.logback.rollingpolicy.max-file-size=10MB
 logging.logback.rollingpolicy.max-history=7
 ```
@@ -94,54 +94,140 @@ Actuator endpoints are exposed under `/just-me` on OrderService, for example `lo
 
 ## Communication
 
+Services share data in two ways:
+
+- **Events through RabbitMQ (main way):** when a service changes its data, it publishes an event. Other services listen and keep a local copy of the data they need, so they do not call each other to read data.
+- **Feign through Eureka (fallback):** OrderService calls another service only when its local copy is missing or not enough to be sure before accepting an order.
+
 ```
-                Postman ──▶ api-gateway :8080 ──▶ any service (via Eureka)
+                         Postman ──▶ api-gateway :8080 ──▶ any service (via Eureka)
 
-                          Eureka-Server :8761
-                     (every service registers here)
+                                    RabbitMQ :5672
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │                                                                          │
+   │  AddUpdateProduct ──publish──▶ [product-events] ──▶ ProductInvetory      │
+   │                                                └──▶ OrderService         │
+   │                                                                          │
+   │  ProductInvetory  ──publish──▶ [inventory-events] ──▶ OrderService       │
+   │                                                                          │
+   │  OrderService     ──publish──▶ [order-events] ──▶ ProductInvetory        │
+   │                                                                          │
+   │  OrderService     ──publish──▶ [createOrders] ──▶ OrderService (saves)   │
+   │                                                                          │
+   └──────────────────────────────────────────────────────────────────────────┘
 
-AddUpdateProduct :7002 ──writes──▶ [training_products] ◀──reads── FetchAllProduct :7009
-                                                                    ▲          ▲
-                                                       GET /products│          │GET /products
-                                                  GET /products/{id}│          │
-                                                                    │          │
-                               OrderService :8089 ──────────────────┘          │
-                                      │                                        │
-                                      │ GET  /inventory/available/{productId}  │
-                                      │ POST /inventory/deduct                 │
-                                      │ POST /inventory/add                    │
-                                      ▼                                        │
-                               ProductInvetory :7004 ──────────────────────────┘
+   OrderService ──Feign (fallback only)──▶ FetchAllProduct  GET /products/{id}
+   OrderService ──Feign (fallback only)──▶ ProductInvetory  GET /inventory/available/{productId}
 ```
 
-Feign clients look up the target by its Eureka name, for example `@FeignClient(name = "inventory-service")`. The name must match the target's `spring.application.name`.
+### Events
+
+| Exchange | Published by | When | Event | Consumed by (queue) | What the consumer does |
+|---|---|---|---|---|---|
+| `product-events` | AddUpdateProduct | Product added, updated, and all products on startup | `ProductEvent(id, name, price, action)` with action `ADDED`, `UPDATED` or `SYNC` | ProductInvetory (`product-events.inventory-service`) | Saves the product in its `product_info` table |
+| | | | | OrderService (`product-events.order-service`) | Saves the product in its `product_info` table |
+| `inventory-events` | ProductInvetory | Every ADD or DEDUCT, and current stock on startup | `InventoryEvent(productId, quantity, closingQuantity, action)` with action `ADD`, `DEDUCT` or `SYNC` | OrderService (`inventory-events.order-service`) | Saves the closing quantity in its `stock_info` table |
+| `order-events` | OrderService | Order saved or cancelled | `OrderEvent(orderId, productId, quantity, totalPrice, status)` with status `PLACED` or `CANCELLED` | ProductInvetory (`order-events.inventory-service`) | `PLACED` records a DEDUCT, `CANCELLED` records an ADD |
+| `createOrders` | OrderService | Order request accepted | `OrderMessage(productId, quantity, price)` | OrderService (`createOrders.createOrder-group`) | Saves the `Order` and `OrderItem` |
+
+FetchAllProduct does not publish or consume events. It shares the `training_products` database with AddUpdateProduct, so it sees new products straight away.
+
+### Local copies
+
+| Service | Table | Filled from | Used for |
+|---|---|---|---|
+| ProductInvetory | `product_info` (id, name, price) | `product-events` | Product names in `GET /inventory` and `GET /inventory/products` |
+| OrderService | `product_info` (id, name, price) | `product-events` | Product price when placing an order, product names in `GET /orders` |
+| OrderService | `stock_info` (productId, availableQuantity) | `inventory-events` | Stock check when placing an order |
+
+The tables use the id from the event, so `save()` inserts the row the first time and updates it after that. Receiving the same event twice does not create duplicates.
+
+RabbitMQ only delivers messages and removes them once they are read, so the tables keep the latest data for later requests. Both OrderService instances share `order_db`, so whichever instance receives an event, both see the update.
+
+### Feign fallback
 
 | Caller | Called service | Endpoint | When |
 |---|---|---|---|
-| OrderService | fetch-product-service | `GET /products/{id}` | Placing an order, to get the product price |
-| OrderService | inventory-service | `GET /inventory/available/{productId}` | Placing an order, to check stock |
-| OrderService | inventory-service | `POST /inventory/deduct` | Placing an order, to reduce stock |
-| OrderService | inventory-service | `POST /inventory/add` | Cancelling an order, to return stock |
-| OrderService | fetch-product-service | `GET /products` | Listing orders, to show product names on order items |
-| ProductInvetory | fetch-product-service | `GET /products` | Listing inventory and product stock, to show product names |
+| OrderService | fetch-product-service | `GET /products/{id}` | The product is not in the local `product_info` |
+| OrderService | inventory-service | `GET /inventory/available/{productId}` | The product is not in the local `stock_info`, or the local quantity is lower than the order quantity |
 
-If FetchAllProduct is down, `GET /orders` and `GET /inventory` still return, but `productName` is `null`. `GET /inventory/products` fails, because it needs the product list.
+The answer is saved in the local table. If the called service is down, the circuit breaker fallback returns `503`, so an order is never accepted while the stock is unknown.
+
+### Add or update product flow
+
+1. Postman sends `POST` or `PUT localhost:8080/add-update-product/products`.
+2. AddUpdateProduct saves the product and publishes a `ProductEvent` to `product-events`.
+3. ProductInvetory and OrderService each save the product in their `product_info` table.
+
+### Add stock flow
+
+1. Postman sends `POST localhost:8080/inventory-service/inventory/add`.
+2. ProductInvetory saves an ADD record and publishes an `InventoryEvent` with the new closing quantity.
+3. OrderService saves the closing quantity in `stock_info`.
 
 ### Place order flow
 
-1. Postman sends `POST localhost:8080/order-service/orders` with `{"productId":1,"quantity":2}`. The gateway forwards it to OrderService.
-2. OrderService gets the product from FetchAllProduct. If the product is not found, it returns `404`.
-3. OrderService gets the available quantity from ProductInvetory. If the quantity is too low, it returns `400`.
-4. OrderService asks ProductInvetory to deduct the quantity. ProductInvetory saves a DEDUCT record.
-5. OrderService saves an `Order` with status `PLACED`, and an `OrderItem` with the price and total amount.
-6. If there are too many requests, too many orders at once, or the circuit is open, OrderService returns `503` from its fallback.
+1. Postman sends `POST localhost:8080/order-service/orders` with `{"productId":1,"quantity":2}`.
+2. OrderService reads the price from its `product_info`. If the product is missing, it asks FetchAllProduct with Feign. If the product does not exist, it returns `404`.
+3. OrderService reads the stock from its `stock_info`. If it is missing or too low, it asks ProductInvetory with Feign. If the stock is still too low, it returns `400`.
+4. OrderService publishes an `OrderMessage` to `createOrders`, lowers its local `stock_info`, and returns `202 Accepted`.
+5. OrderService consumes the `OrderMessage`, saves the `Order` with status `PLACED` and its `OrderItem`, then publishes an `OrderEvent` (`PLACED`) to `order-events`.
+6. ProductInvetory consumes the `OrderEvent` and records a DEDUCT, then publishes an `InventoryEvent`.
+7. OrderService consumes the `InventoryEvent` and updates `stock_info` with the real closing quantity.
+
+If there are too many requests, too many orders at once, or the circuit is open, OrderService returns `503` from its fallback.
 
 ### Cancel order flow
 
 1. Postman sends `PUT localhost:8080/order-service/orders/{id}/cancel`.
-2. For each order item, OrderService asks ProductInvetory to add the quantity back. ProductInvetory saves an ADD record.
-3. OrderService sets the order status to `CANCELLED`.
-4. If the inventory call fails, it is retried up to 3 times before the fallback returns `503`.
+2. OrderService sets the order status to `CANCELLED` and publishes an `OrderEvent` (`CANCELLED`) for each order item.
+3. ProductInvetory consumes the event and records an ADD, then publishes an `InventoryEvent`.
+4. OrderService consumes the `InventoryEvent` and updates `stock_info`.
+
+If ProductInvetory is down, the events wait in the `order-events.inventory-service` queue and the stock is returned when it starts again.
+
+### Startup sync
+
+- AddUpdateProduct publishes every product with action `SYNC` when it starts.
+- ProductInvetory publishes the current stock of every product with action `SYNC` when it starts.
+- Producers declare the consumer queues with `producer.required-groups`, so events wait in the queue even if the consumer has not started yet.
+
+### RabbitMQ settings
+
+All services connect to RabbitMQ on `localhost:5672` with `guest` / `guest`. The bindings are in each service's `application.properties`:
+
+AddUpdateProduct:
+```
+spring.cloud.stream.bindings.productEvents-out-0.destination=product-events
+spring.cloud.stream.bindings.productEvents-out-0.producer.required-groups=inventory-service,order-service
+```
+
+ProductInvetory:
+```
+spring.cloud.function.definition=productEvents;orderEvents
+spring.cloud.stream.bindings.productEvents-in-0.destination=product-events
+spring.cloud.stream.bindings.productEvents-in-0.group=inventory-service
+spring.cloud.stream.bindings.orderEvents-in-0.destination=order-events
+spring.cloud.stream.bindings.orderEvents-in-0.group=inventory-service
+spring.cloud.stream.bindings.inventoryEvents-out-0.destination=inventory-events
+spring.cloud.stream.bindings.inventoryEvents-out-0.producer.required-groups=order-service
+```
+
+OrderService:
+```
+spring.cloud.function.definition=receiveOrders;productEvents;inventoryEvents
+spring.cloud.stream.bindings.sendOrder-out-0.destination=createOrders
+spring.cloud.stream.bindings.receiveOrders-in-0.destination=createOrders
+spring.cloud.stream.bindings.receiveOrders-in-0.group=createOrder-group
+spring.cloud.stream.bindings.productEvents-in-0.destination=product-events
+spring.cloud.stream.bindings.productEvents-in-0.group=order-service
+spring.cloud.stream.bindings.inventoryEvents-in-0.destination=inventory-events
+spring.cloud.stream.bindings.inventoryEvents-in-0.group=order-service
+spring.cloud.stream.bindings.orderEvents-out-0.destination=order-events
+spring.cloud.stream.bindings.orderEvents-out-0.producer.required-groups=inventory-service
+```
+
+Open `localhost:15672` (`guest` / `guest`) to see the exchanges, the queues and the message rates.
 
 ## Patterns used
 
@@ -152,7 +238,10 @@ If FetchAllProduct is down, `GET /orders` and `GET /inventory` still return, but
 | Design | Command/query split | AddUpdateProduct writes, FetchAllProduct reads |
 | Communication | API Gateway | Single entry point on 8080 with routing and logging |
 | Communication | Service registry and discovery | Eureka, services call each other by name |
-| Communication | Synchronous REST with a declarative client | OpenFeign |
+| Communication | Event-driven communication | RabbitMQ with Spring Cloud Stream: `product-events`, `inventory-events`, `order-events` |
+| Communication | Local read model (data replication) | `product_info` and `stock_info` tables filled from events |
+| Communication | Asynchronous request processing | Order requests go through `createOrders` and are saved by the consumer |
+| Communication | Synchronous REST with a declarative client | OpenFeign, used as a fallback |
 | Communication | Client-side load balancing | Gateway `lb()` and Feign through Eureka |
 | Communication | Multiple instances per service | FetchAllProduct and OrderService |
 | Reliability | Circuit breaker with fallback | OrderService and inventory-service |
@@ -167,7 +256,7 @@ If FetchAllProduct is down, `GET /orders` and `GET /inventory` still return, but
 Not yet in place:
 
 - AddUpdateProduct and FetchAllProduct share the `training_products` database.
-- Placing an order deducts stock and then saves the order. There is no Saga, so if saving fails the stock is not returned automatically.
+- Two orders can pass the local stock check before inventory catches up. If inventory then has too little stock, it logs a warning and skips the deduction, but the order stays `PLACED`. A Saga with an "order rejected" event would fix this.
 - There is no config server. Each service has its own local `application.properties`.
 
 ## API reference
@@ -342,16 +431,15 @@ Request:
 {"productId": 1, "quantity": 2}
 ```
 
-Response `201 Created`:
-```json
-{"id": 1, "quantity": 2, "totalPrice": 3000000.0, "status": "PLACED", "orderDate": "2026-10-29T10:15:30.123"}
-```
+Response `202 Accepted`: `Order received and will be saved shortly`
+
+The order is saved a moment later by the `createOrders` consumer. Use `GET /orders` to see it.
 
 Response `404 Not Found`: `Product not found`
 
 Response `400 Bad Request`: `Insufficient quantity, available: 1`
 
-Response `503 Service Unavailable`: `Product or Inventory service unavailable. Reason: ...` (rate limit, bulkhead full or circuit open)
+Response `503 Service Unavailable`: `Product or Inventory service unavailable. Reason: ...` (rate limit, bulkhead full, circuit open, or the Feign fallback could not reach the service). `Order not received, please try again` if the order request could not be sent to RabbitMQ.
 
 #### Cancel order
 
@@ -402,11 +490,12 @@ Response `200 OK`:
 ## Running
 
 1. Make sure MySQL is running. The databases are created automatically on first start.
-2. `application.properties` is not tracked by git. Create it in each service's `src/main/resources` with the name and port from the table above.
-3. Start Eureka-Server first, then api-gateway, AddUpdateProduct, FetchAllProduct, ProductInvetory and OrderService. Run each one with `./mvnw spring-boot:run` from its folder.
-4. Start the second FetchAllProduct and OrderService instances on ports 7010 and 8090, as shown in Multiple instances.
-5. Check `localhost:8761` to see that all services are registered, with two instances for fetch-product-service and order-service.
-6. Add stock with `POST localhost:8080/inventory-service/inventory/add`, then place an order with `POST localhost:8080/order-service/orders`.
+2. Make sure RabbitMQ is running, for example `docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:4-management`.
+3. `application.properties` is not tracked by git. Create it in each service's `src/main/resources` with the name and port from the table above.
+4. Start Eureka-Server first, then api-gateway, AddUpdateProduct, FetchAllProduct, ProductInvetory and OrderService. AddUpdateProduct and ProductInvetory publish their data on startup, so OrderService gets the copies even if it starts later. Run each one with `./mvnw spring-boot:run` from its folder.
+5. Start the second FetchAllProduct and OrderService instances on ports 7010 and 8090, as shown in Multiple instances.
+6. Check `localhost:8761` to see that all services are registered, with two instances for fetch-product-service and order-service.
+7. Add stock with `POST localhost:8080/inventory-service/inventory/add`, then place an order with `POST localhost:8080/order-service/orders`.
 
 ## Project Progress
 

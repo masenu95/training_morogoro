@@ -1,6 +1,8 @@
 package com.training.addupdateproduct.controller;
 
+import com.training.addupdateproduct.dto.ProductEvent;
 import com.training.addupdateproduct.entity.Product;
+import com.training.addupdateproduct.events.EventPublisher;
 import com.training.addupdateproduct.repository.ProductRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -14,9 +16,14 @@ public class ProductController {
     @Autowired
     private ProductRepository productRepository;
 
+    @Autowired
+    private EventPublisher eventPublisher;
+
     @PostMapping
     public ResponseEntity<Product> addProduct(@RequestBody Product product) {
-        return new ResponseEntity<>(productRepository.save(product), HttpStatus.CREATED);
+        Product saved = productRepository.save(product);
+        eventPublisher.publish("productEvents-out-0", new ProductEvent(saved.getId(), saved.getName(), saved.getPrice(), "ADDED"));
+        return new ResponseEntity<>(saved, HttpStatus.CREATED);
     }
 
     @PutMapping("/{id}")
@@ -28,6 +35,8 @@ public class ProductController {
         existing.setName(product.getName());
         existing.setDescription(product.getDescription());
         existing.setPrice(product.getPrice());
-        return ResponseEntity.ok(productRepository.save(existing));
+        Product saved = productRepository.save(existing);
+        eventPublisher.publish("productEvents-out-0", new ProductEvent(saved.getId(), saved.getName(), saved.getPrice(), "UPDATED"));
+        return ResponseEntity.ok(saved);
     }
 }

@@ -1,6 +1,8 @@
 package com.training.addupdateproduct.config;
 
+import com.training.addupdateproduct.dto.ProductEvent;
 import com.training.addupdateproduct.entity.Product;
+import com.training.addupdateproduct.events.EventPublisher;
 import com.training.addupdateproduct.repository.ProductRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
@@ -11,6 +13,9 @@ public class ProductSeeder implements CommandLineRunner {
 
     @Autowired
     private ProductRepository productRepository;
+
+    @Autowired
+    private EventPublisher eventPublisher;
 
     @Override
     public void run(String... args) {
@@ -26,6 +31,9 @@ public class ProductSeeder implements CommandLineRunner {
         save("Power Bank", "20000mAh power bank", 60000.0);
         save("Tablet", "Lenovo Tab M10", 550000.0);
         save("Speaker", "Portable bluetooth speaker", 75000.0);
+
+        productRepository.findAll().forEach(p ->
+                eventPublisher.publish("productEvents-out-0", new ProductEvent(p.getId(), p.getName(), p.getPrice(), "SYNC")));
     }
 
     private void save(String name, String description, Double price) {

@@ -5,12 +5,18 @@ import com.training.orderservice.dto.OrderItemDetails;
 import com.training.orderservice.dto.OrderMessage;
 import com.training.orderservice.dto.OrderRequest;
 import com.training.orderservice.dto.Product;
+import com.training.orderservice.dto.OrderEvent;
 import com.training.orderservice.entity.Order;
 import com.training.orderservice.entity.OrderItem;
+import com.training.orderservice.entity.ProductInfo;
+import com.training.orderservice.entity.StockInfo;
+import com.training.orderservice.events.EventPublisher;
 import com.training.orderservice.feignclient.InventoryFeignClient;
 import com.training.orderservice.feignclient.ProductFeignClient;
 import com.training.orderservice.repository.OrderItemRepository;
 import com.training.orderservice.repository.OrderRepository;
+import com.training.orderservice.repository.ProductInfoRepository;
+import com.training.orderservice.repository.StockInfoRepository;
 import com.training.orderservice.services.OrderProcessService;
 import feign.FeignException;
 import io.github.resilience4j.bulkhead.annotation.Bulkhead;
@@ -24,9 +30,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/orders")
@@ -37,6 +43,15 @@ public class OrderController {
 
     @Autowired
     private OrderItemRepository orderItemRepository;
+
+    @Autowired
+    private ProductInfoRepository productInfoRepository;
+
+    @Autowired
+    private StockInfoRepository stockInfoRepository;
+
+    @Autowired
+    private EventPublisher eventPublisher;
 
     @Autowired
     private ProductFeignClient productFeignClient;
@@ -52,20 +67,27 @@ public class OrderController {
     @Bulkhead(name = "orderBulkhead", fallbackMethod = "placeOrderFallback", type = Bulkhead.Type.SEMAPHORE)
     @CircuitBreaker(name = "orderService", fallbackMethod = "placeOrderFallback")
     public ResponseEntity<?> placeOrder(@RequestBody OrderRequest request) {
-        Product product;
-        product = productFeignClient.getProductById(request.getProductId());
+        ProductInfo product = productInfoRepository.findById(request.getProductId())
+                .orElseGet(() -> fetchProduct(request.getProductId()));
+        if (product == null) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found");
+        }
 
-        Integer available = inventoryFeignClient.getAvailableQuantity(request.getProductId());
-        if (available == null || available < request.getQuantity()) {
+        StockInfo stock = stockInfoRepository.findById(request.getProductId()).orElse(null);
+        if (stock == null || stock.getAvailableQuantity() < request.getQuantity()) {
+            stock = fetchStock(request.getProductId());
+        }
+        Integer available = stock.getAvailableQuantity();
+        if (available < request.getQuantity()) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Insufficient quantity, available: " + available);
         }
 
-        inventoryFeignClient.deductQuantity(request);
-
         if (!orderProcessService.sendOrder(new OrderMessage(request.getProductId(), request.getQuantity(), product.getPrice()))) {
-            inventoryFeignClient.addQuantity(request);
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Order not received, please try again");
         }
+
+        stock.setAvailableQuantity(available - request.getQuantity());
+        stockInfoRepository.save(stock);
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body("Order received and will be saved shortly");
     }
@@ -89,12 +111,14 @@ public class OrderController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Order already cancelled");
         }
 
+        order.setStatus("CANCELLED");
+        order = orderRepository.save(order);
+
         for (OrderItem item : orderItemRepository.findByOrderId(id)) {
-            inventoryFeignClient.addQuantity(new OrderRequest(item.getProductId(), item.getQuantity()));
+            eventPublisher.publish("orderEvents-out-0", new OrderEvent(order.getId(), item.getProductId(), item.getQuantity(), item.getTotalAmount(), order.getStatus()));
         }
 
-        order.setStatus("CANCELLED");
-        return ResponseEntity.ok(orderRepository.save(order));
+        return ResponseEntity.ok(order);
     }
 
     // FIXED: Added Throwable parameter, changed parameter to match 'Long id', and removed @PathVariable
@@ -142,13 +166,28 @@ public class OrderController {
                 .toList();
     }
 
-    private Map<Long, String> getProductNames() {
-        Map<Long, String> productNames = new HashMap<>();
+    private ProductInfo fetchProduct(Long productId) {
         try {
-            productFeignClient.getAllProducts().forEach(p -> productNames.put(p.getId(), p.getName()));
-        } catch (FeignException e) {
-            return productNames;
+            Product p = productFeignClient.getProductById(productId);
+            ProductInfo product = new ProductInfo();
+            product.setId(p.getId());
+            product.setName(p.getName());
+            product.setPrice(p.getPrice());
+            return productInfoRepository.save(product);
+        } catch (FeignException.NotFound e) {
+            return null;
         }
-        return productNames;
+    }
+
+    private StockInfo fetchStock(Long productId) {
+        StockInfo stock = new StockInfo();
+        stock.setProductId(productId);
+        stock.setAvailableQuantity(inventoryFeignClient.getAvailableQuantity(productId));
+        return stockInfoRepository.save(stock);
+    }
+
+    private Map<Long, String> getProductNames() {
+        return productInfoRepository.findAll().stream()
+                .collect(Collectors.toMap(ProductInfo::getId, ProductInfo::getName));
     }
 }
