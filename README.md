@@ -45,6 +45,62 @@ logging.logback.rollingpolicy.max-history=7
 
 The `logs/` folder is not tracked by git.
 
+## Security (Spring Security + Keycloak)
+
+Each service secures itself. AddUpdateProduct, FetchAllProduct, ProductInvetory and OrderService are each an OAuth2 resource server with their own `SecurityConfig`. The api-gateway only routes and passes the `Authorization` header through.
+
+```
+client ──username/password──▶ Keycloak :8180 ──access token──▶ client
+client ──Bearer token──▶ api-gateway :8080 ──Bearer token──▶ service (checks the token)
+OrderService ──Feign + same Bearer token──▶ FetchAllProduct / ProductInvetory
+```
+
+| Service | Rule |
+|---|---|
+| AddUpdateProduct | `ADMIN` only |
+| FetchAllProduct | `USER` or `ADMIN` |
+| ProductInvetory | `/inventory/add`, `/inventory/deduct`, `/inventory/simulate/**`: `ADMIN`. Everything else: `USER` or `ADMIN` |
+| OrderService | `USER` or `ADMIN` |
+| Actuator (`/actuator/**`, OrderService `/just-me/**`) | Everyone |
+
+How it works:
+
+- Each service has `spring-boot-starter-oauth2-resource-server` and a `config/SecurityConfig` with its own rules.
+- The Keycloak address is shared in `config-files/application.properties`: `spring.security.oauth2.resourceserver.jwt.issuer-uri=http://localhost:8180/realms/Training`. Spring downloads Keycloak's public key and checks the token signature, expiry and issuer.
+- Keycloak puts roles in `realm_access.roles`, so a small converter turns them into Spring roles (`ROLE_USER`, `ROLE_ADMIN`).
+- OrderService's `FeignTokenConfig` copies the caller's token onto its Feign calls, so FetchAllProduct and ProductInvetory accept them.
+- RabbitMQ events do not use tokens, so event flows keep working.
+- No token, or a bad or expired token: `401`. A valid token with the wrong role: `403`. This is the same through the gateway and on direct service ports.
+
+### Keycloak setup
+
+Keycloak runs on port 8180, because the gateway uses 8080:
+
+```
+~/keycloak-26.8.1/bin/kc.sh start-dev --http-port=8180
+```
+
+The realm is `Training` (realm names are case-sensitive). To create it from a file, open `http://localhost:8180`, go to **Manage realms → Create realm → Browse** and choose `keycloak/training-realm.json`. It creates:
+
+| Item | Value |
+|---|---|
+| Realm | `Training` |
+| Client | `order-app`, secret `order-app-secret` |
+| User `customer` / `customer123` | role `USER` |
+| User `admin` / `admin123` | role `ADMIN` |
+
+### Getting and using a token
+
+```
+TOKEN=$(curl -s -X POST localhost:8180/realms/Training/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=order-app -d client_secret=order-app-secret \
+  -d username=customer -d password=customer123 | jq -r .access_token)
+
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/fetch-product-service/products/1
+```
+
+Tokens expire after 5 minutes. In Kubernetes, the four services read Keycloak's keys from `host.docker.internal:8180` through `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI`.
+
 ## Multiple instances
 
 FetchAllProduct and OrderService get the most traffic, so each runs two instances on different ports.
@@ -497,6 +553,178 @@ Response `200 OK`:
 6. Check `localhost:8761` to see that all services are registered, with two instances for fetch-product-service and order-service.
 7. Add stock with `POST localhost:8080/inventory-service/inventory/add`, then place an order with `POST localhost:8080/order-service/orders`.
 
+## Kubernetes deployment
+
+The services can run on the Kubernetes cluster that comes with Docker Desktop. HateaosDemo and the order management system (Eureka, api-gateway and the four services) have manifests in the `k8s` folder, and are deployed and tested this way.
+
+### Requirements
+
+1. Docker Desktop with Kubernetes turned on: Settings > Kubernetes > Enable Kubernetes.
+2. `kubectl` pointing to the Docker Desktop cluster:
+   ```
+   kubectl config use-context docker-desktop
+   kubectl get nodes
+   ```
+   The node `docker-desktop` should be `Ready`.
+
+Docker Desktop's Kubernetes uses the same images as Docker, so an image built with `docker build` can be used straight away without pushing it to a registry.
+
+### Deploy a service (example: HateaosDemo)
+
+1. Build the image from the service folder:
+   ```
+   cd HateaosDemo
+   docker build -t spring-app-hateaos-demo .
+   ```
+2. Deploy it with the manifest in `k8s/hateaos-demo.yaml`:
+   ```
+   kubectl apply -f k8s/hateaos-demo.yaml
+   ```
+3. Check that the pods are running:
+   ```
+   kubectl get pods -l app=hateaos-demo
+   kubectl get svc hateaos-demo
+   ```
+4. Call the service:
+   ```
+   curl localhost:30077/employees-hateaos/2
+   ```
+
+### What the manifest contains
+
+`k8s/hateaos-demo.yaml` has two parts:
+
+| Part | What it does |
+|---|---|
+| `Deployment` | Runs 2 copies (pods) of the image. If a pod crashes, Kubernetes starts a new one. `imagePullPolicy: Never` uses the local image instead of downloading one |
+| `Service` | Gives the pods one stable address and shares requests between them. `type: NodePort` with `nodePort: 30077` makes it reachable from the computer at `localhost:30077` |
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hateaos-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hateaos-demo
+  template:
+    metadata:
+      labels:
+        app: hateaos-demo
+    spec:
+      containers:
+        - name: hateaos-demo
+          image: spring-app-hateaos-demo:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8077
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hateaos-demo
+spec:
+  type: NodePort
+  selector:
+    app: hateaos-demo
+  ports:
+    - port: 8077
+      targetPort: 8077
+      nodePort: 30077
+```
+
+### Common commands
+
+| Task | Command |
+|---|---|
+| See pods | `kubectl get pods` |
+| See logs | `kubectl logs -f deployment/hateaos-demo` |
+| Update after code changes | `docker build -t spring-app-hateaos-demo .` then `kubectl rollout restart deployment/hateaos-demo` |
+| Scale to 3 pods | `kubectl scale deployment/hateaos-demo --replicas=3` |
+| See why a pod fails | `kubectl describe pod <pod-name>` |
+| Remove | `kubectl delete -f k8s/hateaos-demo.yaml` |
+
+### Order management system in the cluster
+
+Eureka, the api-gateway and the four services run in the cluster. MySQL, RabbitMQ and ConfigServer stay on the computer, and the pods reach them through `host.docker.internal`.
+
+```
+                    Postman ──▶ localhost:30080
+                                     │
+   ┌──────────────── Kubernetes ─────┼──────────────────────────────┐
+   │                                 ▼                              │
+   │   eureka-server (1 pod) ◀── api-gateway (2 pods)               │
+   │          ▲                      │ lb() through Eureka          │
+   │          │ register             ▼                              │
+   │   add-update-product, fetch-product-service,                   │
+   │   inventory-service, order-service (2 pods each)               │
+   └──────────────────────────────┬─────────────────────────────────┘
+                                  │ host.docker.internal
+                     MySQL :3306, RabbitMQ :5672, ConfigServer :8888
+```
+
+| Service | Manifest | Image | Pods | URL from the computer |
+|---|---|---|---|---|
+| eureka-server | `k8s/eureka-server.yaml` | `training-eureka-server` | 1 | `localhost:30761` |
+| api-gateway | `k8s/api-gateway.yaml` | `training-api-gateway` | 2 | `localhost:30080` |
+| add-update-product | `k8s/add-update-product.yaml` | `training-add-update-product` | 2 | `localhost:30002` |
+| fetch-product-service | `k8s/fetch-product-service.yaml` | `training-fetch-product-service` | 2 | `localhost:30009` |
+| inventory-service | `k8s/inventory-service.yaml` | `training-inventory-service` | 2 | `localhost:30004` |
+| order-service | `k8s/order-service.yaml` | `training-order-service` | 2 | `localhost:30089` |
+
+The cluster has its own Eureka, separate from the one on the computer, so services running in the IDE and in the cluster do not mix.
+
+The Deployments set these env vars:
+
+| Env var | Value | Why |
+|---|---|---|
+| `CONFIG_SERVER_URL` | `http://host.docker.internal:8888` | ConfigServer on the computer (the four services) |
+| `SPRING_DATASOURCE_URL` | `jdbc:mysql://host.docker.internal:3306/<db>` | MySQL on the computer (the four services) |
+| `SPRING_RABBITMQ_HOST` | `host.docker.internal` | RabbitMQ on the computer (the four services) |
+| `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE` | `http://eureka-server:8761/eureka/` | Eureka in the cluster, found by its Kubernetes Service name |
+| `EUREKA_INSTANCE_PREFERIPADDRESS`, `EUREKA_INSTANCE_IPADDRESS` | `true`, the pod IP | The shared config registers `localhost`, which inside a pod means the pod itself. With the pod IP, the gateway and Feign can reach each pod |
+| `EUREKA_INSTANCE_INSTANCEID` | The pod name | The shared config uses `name:port`, which would be the same for both pods |
+| `LOGGING_FILE_NAME` | `/app/logs/api-gateway.log` | The gateway log file inside the container. Read it with `kubectl logs deployment/api-gateway` |
+
+#### Deploy
+
+1. Start MySQL, RabbitMQ and ConfigServer on the computer.
+2. Build the images, from each service folder:
+   ```
+   docker build -t training-eureka-server .
+   docker build -t training-api-gateway .
+   docker build -t training-add-update-product .
+   docker build -t training-fetch-product-service .
+   docker build -t training-inventory-service .
+   docker build -t training-order-service .
+   ```
+3. Deploy Eureka first, then the rest:
+   ```
+   kubectl apply -f k8s/eureka-server.yaml
+   kubectl apply -f k8s/add-update-product.yaml -f k8s/fetch-product-service.yaml -f k8s/inventory-service.yaml -f k8s/order-service.yaml -f k8s/api-gateway.yaml
+   kubectl get pods
+   ```
+   Wait until all pods are `Running` and `1/1` ready, then about 30 seconds for the gateway to get the service list from Eureka.
+4. Open `localhost:30761`: each service shows 2 instances with pod names.
+5. Call the services through the gateway:
+   ```
+   curl localhost:30080/fetch-product-service/products/1
+   curl localhost:30080/inventory-service/inventory/products
+   curl -X POST localhost:30080/order-service/orders -H 'Content-Type: application/json' -d '{"productId":1,"quantity":1}'
+   ```
+
+Remove everything:
+```
+kubectl delete -f k8s/
+```
+
+#### Notes
+
+- If the same services also run in the IDE, both share the RabbitMQ queues and the databases. Each message is handled by one of them, with the same result, because they use the same databases.
+- The full Kubernetes setup would also run MySQL, RabbitMQ and ConfigServer in the cluster, and could use Kubernetes Service names instead of Eureka.
+
 ## Project Progress
 
 We have completed a working microservices system with four business services for products, inventory and orders. Each service has its own database and talks to the others through Feign clients. Eureka handles service discovery, and the API gateway gives clients one entry point with request logging. OrderService is now protected with a circuit breaker, retry, rate limiter, bulkhead and time limiter, so it fails gracefully when other services are slow or down. All endpoints are documented with sample requests and responses for Postman testing.
@@ -512,3 +740,18 @@ We have completed a working microservices system with four business services for
 1. Our internal systems, such as stock, procurement and service requests, can be built as separate services that are deployed and updated independently.
 2. A single gateway gives one secure, logged entry point to institutional services, which makes monitoring and auditing easier.
 3. Resilience patterns keep critical public services available during peak usage or partial outages, which improves service delivery to citizens.
+
+
+show all componenets
+kubectl get all
+
+kubectl apply -f service.yaml
+
+kubectl get all
+
+
+
+kubectl delete pod/spring-app-add-employee-
+
+kubectl apply -f k8s/add-update-product.yaml -f k8s/fetch-product-service.yaml -f k8s/inventory-service.yaml -f k8s/order-service.yaml
+kubectl get pods

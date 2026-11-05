@@ -23,9 +23,9 @@ import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import io.github.resilience4j.retry.annotation.Retry;
-import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
 import io.micrometer.observation.annotation.Observed;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cloud.client.circuitbreaker.NoFallbackAvailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -63,8 +63,8 @@ public class OrderController {
     private OrderProcessService orderProcessService;
 
     @PostMapping
-    @RateLimiter(name = "orderRateLimiter", fallbackMethod = "placeOrderFallback")
-    @Bulkhead(name = "orderBulkhead", fallbackMethod = "placeOrderFallback", type = Bulkhead.Type.SEMAPHORE)
+    @RateLimiter(name = "orderRateLimiter")
+    @Bulkhead(name = "orderBulkhead", type = Bulkhead.Type.SEMAPHORE)
     @CircuitBreaker(name = "orderService", fallbackMethod = "placeOrderFallback")
     public ResponseEntity<?> placeOrder(@RequestBody OrderRequest request) {
         ProductInfo product = productInfoRepository.findById(request.getProductId())
@@ -95,8 +95,9 @@ public class OrderController {
     // FIXED: Added Throwable parameter and removed @RequestBody
     @Observed(name = "place.order-fallback.execution")
     public ResponseEntity<?> placeOrderFallback(OrderRequest request, Throwable t) {
+        Throwable reason = t instanceof NoFallbackAvailableException && t.getCause() != null ? t.getCause() : t;
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .body("Product or Inventory service unavailable. Reason: " + t.getMessage());
+                .body("Product or Inventory service unavailable. Reason: " + reason.getMessage());
     }
 
     @PutMapping("/{id}/cancel")
@@ -176,6 +177,11 @@ public class OrderController {
             return productInfoRepository.save(product);
         } catch (FeignException.NotFound e) {
             return null;
+        } catch (NoFallbackAvailableException e) {
+            if (e.getCause() instanceof FeignException.NotFound) {
+                return null;
+            }
+            throw e;
         }
     }
 

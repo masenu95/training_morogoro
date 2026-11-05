@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spring-app-add-employee
+  labels:
+    app: spring-app-add-employee
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spring-app-add-employee
+  template:
+    metadata:
+      labels:
+        app: spring-app-add-employee
+    spec:
+      containers:
+        - name: spring-app-add-employee
+          image: spring-app-add-employee:latest
+          imagePullPolicy: IfNotPresent # Change to 'Never' if using a local Minikube/kind image
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spring-app-add-employee-service
+spec:
+  type: ClusterIP # Change to 'NodePort' or 'LoadBalancer' if external access is needed
+  selector:
+    app: spring-app-add-employee
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080

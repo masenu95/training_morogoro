@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  labels:
+    app: inventory-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+    spec:
+      containers:
+        - name: inventory-service
+          image: training-inventory-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7004
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CONFIG_SERVER_URL
+              value: http://host.docker.internal:8888
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:mysql://host.docker.internal:3306/inventory_db?createDatabaseIfNotExist=true
+            - name: SPRING_RABBITMQ_HOST
+              value: host.docker.internal
+            - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI
+              value: http://host.docker.internal:8180/realms/Training/protocol/openid-connect/certs
+            - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+              value: http://eureka-server:8761/eureka/
+            - name: EUREKA_INSTANCE_PREFERIPADDRESS
+              value: "true"
+            - name: EUREKA_INSTANCE_IPADDRESS
+              value: $(POD_IP)
+            - name: EUREKA_INSTANCE_INSTANCEID
+              value: $(POD_NAME)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+spec:
+  type: NodePort
+  selector:
+    app: inventory-service
+  ports:
+    - port: 7004
+      targetPort: 7004
+      nodePort: 30004

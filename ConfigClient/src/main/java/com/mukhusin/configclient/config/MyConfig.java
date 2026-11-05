@@ -1,8 +1,11 @@
 package com.mukhusin.configclient.config;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@ConfigurationProperties(prefix = "config-management-service")
 public class MyConfig {
+
     private String compName;
     private int pincode;
 

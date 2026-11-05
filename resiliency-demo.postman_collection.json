@@ -1,0 +1,353 @@
+{
+  "info": {
+    "name": "Resiliency Demo",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "order",
+      "value": "http://localhost:8089"
+    },
+    {
+      "key": "inventory",
+      "value": "http://localhost:7004"
+    },
+    {
+      "key": "product",
+      "value": "http://localhost:7009"
+    },
+    {
+      "key": "orderId",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "Add stock (100 of product 1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{inventory}}/inventory/add",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 100}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Inventory mode OK",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{inventory}}/inventory/simulate/ok"
+          }
+        },
+        {
+          "name": "Circuit breaker state",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{order}}/just-me/circuitbreakers"
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Normal order",
+      "item": [
+        {
+          "name": "Place order (expect 202)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{order}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 1}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([202]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Rate limiter",
+      "item": [
+        {
+          "name": "Place order (run 8x in Runner)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{order}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 1}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([202, 503]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List products (run 6x in Runner)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{product}}/products"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([200, 429]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Time limiter",
+      "item": [
+        {
+          "name": "Inventory mode SLOW",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{inventory}}/inventory/simulate/slow"
+          }
+        },
+        {
+          "name": "Big order (fails after 3 s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{order}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 100000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([400, 503]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventory mode OK",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{inventory}}/inventory/simulate/ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Circuit breaker",
+      "item": [
+        {
+          "name": "Inventory mode ERROR",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{inventory}}/inventory/simulate/error"
+          }
+        },
+        {
+          "name": "Big order (run 12x, delay 1000 ms)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{order}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 100000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([400, 503]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Circuit breaker state",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{order}}/just-me/circuitbreakers"
+          }
+        },
+        {
+          "name": "Inventory mode OK",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{inventory}}/inventory/simulate/ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Resilient by design",
+      "item": [
+        {
+          "name": "Place order while inventory is stopped",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{order}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"productId\": 1, \"quantity\": 2}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status \" + pm.response.code, () => pm.expect([202]).to.include(pm.response.code));",
+                  "console.log(pm.info.iteration + 1, pm.response.code, pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventory history of product 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{inventory}}/inventory/1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Orders and cancel",
+      "item": [
+        {
+          "name": "List orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{order}}/orders"
+          }
+        },
+        {
+          "name": "Cancel order {{orderId}}",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": "{{order}}/orders/{{orderId}}/cancel"
+          }
+        }
+      ]
+    }
+  ]
+}

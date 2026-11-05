@@ -34,6 +34,8 @@ public class ProductInventoryController {
     @Autowired
     private InventoryService inventoryService;
 
+    private volatile String mode = "ok";
+
     @GetMapping
     public List<InventoryDetails> getInventory() {
         Map<Long, String> productNames = getProductNames();
@@ -75,8 +77,20 @@ public class ProductInventoryController {
 
     @GetMapping("/available/{productId}")
     @CircuitBreaker(name = "inventoryService", fallbackMethod = "availableFallback")
-    public ResponseEntity<?> availableQuantity(@PathVariable Long productId) {
+    public ResponseEntity<?> availableQuantity(@PathVariable Long productId) throws InterruptedException {
+        if ("slow".equals(mode)) {
+            Thread.sleep(5000);
+        }
+        if ("error".equals(mode)) {
+            throw new RuntimeException("Inventory database failure");
+        }
         return ResponseEntity.ok(inventoryService.getAvailable(productId));
+    }
+
+    @PostMapping("/simulate/{mode}")
+    public String simulate(@PathVariable String mode) {
+        this.mode = mode;
+        return "Inventory mode set to: " + mode;
     }
 
     @Observed(name = "available-inventory-fallback-execution")

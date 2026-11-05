@@ -16,4 +16,9 @@ public class ConfigController {
     public CompanyPojo getValues_actual() {
         return new CompanyPojo(config.getCompName(),config.getPincode());
     }
+
+    @GetMapping("/data")
+    public CompanyPojo getData_actual() {
+        return new CompanyPojo(config.getCompName(),config.getPincode());
+    }
 }
